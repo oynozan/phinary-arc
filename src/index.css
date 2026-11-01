@@ -1,0 +1,137 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand: #1083ff;
+  --up: #97cb3d;
+  --down: #f44708;
+  --canvas: #050f20;
+  --card: #0c1b35;
+  --raised: #13264a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--canvas);
+  color: #fff;
+  font-family: 'Akt', 'Manrope', ui-sans-serif, sans-serif;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(16, 131, 255, 0.5);
+}
+
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+@layer utilities {
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .text-dim {
+    color: rgba(255, 255, 255, 0.6);
+  }
+  .num {
+    font-family: 'Manrope', 'Akt', ui-sans-serif, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* Surfaces */
+  .card {
+    @apply rounded-card bg-card p-6;
+  }
+  .panel {
+    @apply rounded-inner bg-raised;
+  }
+
+  /* Controls: 44px buttons, 36px chips, 48px inputs, all 12px radius */
+  .btn {
+    @apply inline-flex h-11 items-center justify-center gap-2 rounded-control px-5 text-base font-semibold text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply bg-brand hover:brightness-110;
+  }
+  .btn-secondary {
+    @apply bg-raised hover:bg-hover;
+  }
+  .btn-up {
+    @apply bg-up text-canvas hover:brightness-105;
+  }
+  .btn-down {
+    @apply bg-down hover:brightness-110;
+  }
+  .chip {
+    @apply inline-flex h-9 items-center justify-center rounded-control bg-raised px-3 text-sm font-medium text-white transition hover:bg-hover;
+  }
+  .chip[data-active='true'] {
+    @apply bg-brand;
+  }
+  .field {
+    @apply h-12 w-full rounded-control bg-raised px-4 font-semibold text-white outline-none transition placeholder:font-normal placeholder:text-white/40 focus:ring-2 focus:ring-brand;
+    font-family: 'Manrope', 'Akt', ui-sans-serif, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Segmented control: 16px track, 12px thumb, 4px inset */
+  .seg {
+    @apply inline-flex h-11 items-center rounded-inner bg-raised p-1;
+  }
+  .seg-item {
+    @apply relative inline-flex h-9 items-center justify-center rounded-control px-4 text-base font-medium text-dim transition-colors hover:text-white;
+  }
+  .seg-item[aria-selected='true'] {
+    @apply text-white;
+  }
+
+  .badge {
+    @apply inline-flex h-6 items-center rounded-badge px-2 text-xs font-semibold;
+  }
+
+  .skeleton {
+    @apply relative overflow-hidden rounded-control bg-raised;
+  }
+  .skeleton::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+    animation: shimmer 1.6s infinite;
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
