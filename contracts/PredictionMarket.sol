@@ -12,7 +12,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {PriceOracleAdapter} from "./PriceOracleAdapter.sol";
 import {BlackScholesLib} from "./lib/BlackScholesLib.sol";
 
-/// @notice USDC-collateralized binary markets and a non-transferable internal LP vault for Arc Testnet.
+/// @notice USDC-collateralized binary markets and a non-transferable internal LP vault on Arc.
 /// @dev USDC must be a conventional, non-rebasing, non-fee-on-transfer, six-decimal ERC20.
 ///      One winning position unit pays one raw USDC unit. Prices/volatility are WAD.
 ///      A vault share has 9 display decimals: initially 1e9 internal share units buy
@@ -20,18 +20,25 @@ import {BlackScholesLib} from "./lib/BlackScholesLib.sol";
 ///      share: the raw assets/share ratio is multiplied by 1e3 to normalize decimals.
 ///      Oracle configuration is a trusted dependency. No native-token entry points exist.
 ///      Oracle update-ordering/front-running is an inherent residual risk of oracle-priced
-///      markets, mitigated by the edge, short trade staleness bound, and exposure caps.
+///      markets. The edge and the trade staleness bound reduce it but do not cover an
+///      informed trader near expiry, so trading also requires an oracle price no older than
+///      timeLeft / ORACLE_AGE_RATIO. Exposure is bounded only by vault solvency.
 contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     uint256 public constant WAD = 1e18;
     uint256 public constant MIN_FAIR = 0.02e18;
     uint256 public constant MAX_FAIR = 0.98e18;
+    // Below 1% the MAX_FAIR/MIN_FAIR clamps would sell near-certain payouts under 0.99.
+    uint256 public constant MIN_EDGE = 0.01e18;
     uint256 public constant MAX_EDGE = 0.05e18;
+    uint256 public constant ORACLE_AGE_RATIO = 4;
     uint256 public constant TRADING_CLOSE_BUFFER = 15;
     uint256 public constant VOID_DELAY = 24 hours;
     uint256 public constant DEPOSIT_LOCK = 1 hours;
     uint256 private constant VIRTUAL_SHARES = 1e3;
+    /// @notice Shares (one displayed share) that must stay outstanding while markets hold reserves.
+    uint256 public constant MIN_RESIDUAL_SHARES = 1e9;
 
     struct Market {
         uint8 assetId;
@@ -56,6 +63,7 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 spot;
         uint256 sigma;
         uint256 timeLeft;
+        bool oracleTooOld;
     }
 
     IERC20 public immutable usdc;
@@ -100,6 +108,8 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
     error OrderNotTriggered();
     error DepositLocked(uint256 unlockAt);
     error InsufficientShares();
+    error LastLpWhileExposed();
+    error OracleTooOldForExpiry();
     error UnsupportedTokenBehavior();
 
     event MarketCreated(uint256 indexed marketId, uint8 assetId, uint256 strike, uint256 expiry, address indexed creator);
@@ -143,9 +153,9 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Reenable creation, buys, and deposits.
     function unpause() external onlyOwner { _unpause(); }
 
-    /// @notice Set the additive bid/ask edge, capped at 5% of a payout.
+    /// @notice Set the additive bid/ask edge, from 1% through 5% of a payout.
     function setEdge(uint256 edge) external onlyOwner {
-        if (edge > MAX_EDGE) revert InvalidParameter();
+        if (edge < MIN_EDGE || edge > MAX_EDGE) revert InvalidParameter();
         emit EdgeSet(priceEdge, edge);
         priceEdge = edge;
     }
@@ -202,7 +212,9 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @notice WAD side quotes. Non-open/expired markets return all zeros. In the close
-    ///         buffer fair/spot/vol remain available but executable buy/sell prices are zero.
+    ///         buffer, or while the oracle price is too old for the time left
+    ///         ((now - updatedAt) * ORACLE_AGE_RATIO > timeLeft), fair/spot/vol/timeLeft remain
+    ///         available but executable buy/sell prices are zero.
     /// @dev A buy quote >=0.99 WAD is returned as zero (that buy is not executable).
     function quote(uint256 marketId) external view returns (
         uint256 fairUp, uint256 buyUp, uint256 sellUp, uint256 buyDown, uint256 sellDown,
@@ -221,6 +233,7 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
         if (units == 0) revert InvalidAmount();
         oracle.poke(m.assetId);
         QuoteData memory q = _quote(m);
+        if (q.oracleTooOld) revert OracleTooOldForExpiry();
         uint256 price = isUp ? q.buyUp : q.buyDown;
         if (price == 0) revert BuyPriceTooHigh();
         uint256 cost = Math.mulDiv(units, price, WAD, Math.Rounding.Ceil);
@@ -251,6 +264,7 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
         if (units == 0) revert InvalidAmount();
         oracle.poke(m.assetId);
         QuoteData memory q = _quote(m);
+        if (q.oracleTooOld) revert OracleTooOldForExpiry();
         uint256 proceeds = Math.mulDiv(units, isUp ? q.sellUp : q.sellDown, WAD);
         if (proceeds < minProceeds) revert SlippageExceeded();
         _sellPosition(marketId, msg.sender, isUp, units, proceeds, q);
@@ -343,6 +357,7 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
         if (o.stopPrice == 0 && o.takeProfitPrice == 0) revert InvalidOrder();
         oracle.poke(m.assetId);
         QuoteData memory q = _quote(m);
+        if (q.oracleTooOld) revert OracleTooOldForExpiry();
         uint8 triggered;
         if (o.stopPrice != 0 && (isUp ? q.spot <= o.stopPrice : q.spot >= o.stopPrice)) triggered = 1;
         else if (o.takeProfitPrice != 0 && (isUp ? q.spot >= o.takeProfitPrice : q.spot <= o.takeProfitPrice)) triggered = 2;
@@ -357,10 +372,13 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
 
     /// @notice Deposit raw USDC and mint floor-rounded non-transferable LP shares.
     /// @dev Virtual offset is 1000 shares and one raw USDC unit. Any deposit relocks all caller shares.
-    function deposit(uint256 amount) external nonReentrant whenNotPaused {
+    ///      HIGH NAV counts open-market trader collateral, so a large buy just before a deposit
+    ///      inflates it; minShares bounds that.
+    function deposit(uint256 amount, uint256 minShares) external nonReentrant whenNotPaused {
         if (amount == 0) revert InvalidAmount();
         uint256 minted = previewDeposit(amount);
         if (minted == 0) revert InvalidAmount();
+        if (minted < minShares) revert SlippageExceeded();
         shares[msg.sender] += minted;
         totalShares += minted;
         lastDepositAt[msg.sender] = block.timestamp;
@@ -374,22 +392,31 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @notice Preview floor-rounded raw USDC at LOW NAV, excluding open-market reserves.
-    /// @dev Active-market withdrawals are priced conservatively; full NAV pricing recovers
-    ///      once markets settle. This preview does not check balances, locks, or nonzero output.
+    /// @dev Active-market withdrawals are priced conservatively; shares still held when markets
+    ///      settle are priced at full NAV again. This preview does not check balances, locks,
+    ///      the last-LP rule, or nonzero output.
     function previewWithdraw(uint256 shares) public view returns (uint256 amount) {
         return Math.mulDiv(shares, freeLiquidity() + 1, totalShares + VIRTUAL_SHARES);
     }
 
-    /// @notice Burn shares for floor-rounded raw USDC once the deposit lock expires.
+    /// @notice Burn shares for at least minAmount floor-rounded raw USDC once the deposit lock expires.
     /// @dev Withdrawals during active markets use conservative LOW NAV, including void-refund
-    ///      reserves. Pricing recovers to full NAV once markets settle.
-    function withdraw(uint256 shareAmount) external nonReentrant {
+    ///      reserves; the haircut goes to the remaining LPs. Anyone can lower LOW NAV with buys,
+    ///      so minAmount bounds the payout. While reserves are open, a withdrawal that would leave
+    ///      fewer than MIN_RESIDUAL_SHARES outstanding reverts: nobody (or only dust shares, which
+    ///      would capture the released reserve at a huge share price) would own the reserve
+    ///      released at settlement.
+    function withdraw(uint256 shareAmount, uint256 minAmount) external nonReentrant {
         if (shareAmount == 0) revert InvalidAmount();
         if (shareAmount > shares[msg.sender]) revert InsufficientShares();
         uint256 unlock = depositUnlockAt(msg.sender);
         if (block.timestamp < unlock) revert DepositLocked(unlock);
+        if (totalLocked + _voidRefundBuffer > 0 && totalShares - shareAmount < MIN_RESIDUAL_SHARES) {
+            revert LastLpWhileExposed();
+        }
         uint256 amount = previewWithdraw(shareAmount);
         if (amount == 0) revert InvalidAmount();
+        if (amount < minAmount) revert SlippageExceeded();
         uint256 available = freeLiquidity();
         if (amount > available) revert InsufficientVaultLiquidity();
         shares[msg.sender] -= shareAmount;
@@ -424,7 +451,7 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Raw USDC vault accounting and WAD USDC per 1e9-unit displayed share.
     /// @dev sharePrice1e18 = (totalAssets+1)*1e18*1e3/(totalShares+1e3), initially 1e18.
     ///      withdrawSharePrice1e18 uses LOW NAV instead; active-market withdrawals are
-    ///      conservative and recover to full NAV pricing once markets settle.
+    ///      conservative and shares held through settlement recover to full NAV pricing.
     function vaultStats() external view returns (
         uint256 balance, uint256 assets, uint256 shareSupply, uint256 locked,
         uint256 pendingPayouts, uint256 free, uint256 sharePrice1e18, uint256 withdrawSharePrice1e18
@@ -462,12 +489,15 @@ contract PredictionMarket is Ownable2Step, ReentrancyGuard, Pausable {
     function _quote(Market storage m) private view returns (QuoteData memory q) {
         if (m.status != 0 || block.timestamp >= m.expiry) return q;
         q.timeLeft = uint256(m.expiry) - block.timestamp;
-        (q.spot,) = oracle.getPriceMaxAge(m.assetId, maxTradeStaleness);
+        uint256 updatedAt;
+        (q.spot, updatedAt) = oracle.getPriceMaxAge(m.assetId, maxTradeStaleness);
         q.sigma = oracle.getVol(m.assetId);
         q.fairUp = BlackScholesLib.binaryUpPrice(q.spot, m.strike, q.sigma, q.timeLeft);
         if (q.fairUp < MIN_FAIR) q.fairUp = MIN_FAIR;
         if (q.fairUp > MAX_FAIR) q.fairUp = MAX_FAIR;
-        if (q.timeLeft <= TRADING_CLOSE_BUFFER) return q;
+        // An unseen move during the oracle age is known off chain; near expiry it outweighs the edge.
+        q.oracleTooOld = (block.timestamp - updatedAt) * ORACLE_AGE_RATIO > q.timeLeft;
+        if (q.timeLeft <= TRADING_CLOSE_BUFFER || q.oracleTooOld) return q;
         uint256 fairDown = WAD - q.fairUp;
         q.buyUp = q.fairUp + priceEdge;
         q.buyDown = fairDown + priceEdge;

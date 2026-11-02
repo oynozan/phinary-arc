@@ -3,12 +3,13 @@ import { useAccount, usePublicClient } from 'wagmi'
 import { toast } from 'sonner'
 import { Loader2 } from 'lucide-react'
 import { useMarkets, usePositions, type MyPosition } from '@/hooks/data'
-import { quoteFor, useAllPricing } from '@/hooks/useMarkets'
+import { oracleWaiting, quoteFor, useAllPricing } from '@/hooks/useMarkets'
 import { parseOnchainError, useTx } from '@/hooks/useTx'
 import { prepareSell } from '@/lib/bet'
-import { ASSETS, CHAIN_ID, MARKET, TRADING_CLOSE_BUFFER_S, type Market } from '@/lib/contracts'
-import { fmtCountdown, fmtDurationLong, fmtPrice, fmtUsdc, proceedsOf, wadToNumber } from '@/lib/format'
+import { assetKey, CHAIN_ID, MARKET, TRADING_CLOSE_BUFFER_S, type Market } from '@/lib/contracts'
+import { fmtCountdown, fmtDurationLong, fmtStrike, fmtUsdc, proceedsOf, wadToNumber } from '@/lib/format'
 import { trackMarket, useTrackedMarkets } from '@/lib/session'
+import { HelpTip } from '@/components/ui/help-tip'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 
@@ -23,6 +24,8 @@ interface Row {
 }
 
 const COLS = 'grid grid-cols-[1.2fr_1.5fr_1.2fr_1fr_120px] items-center gap-4'
+/** The contract lets anyone void a market still unsettled this long after expiry (VOID_DELAY), refunding every cost. */
+const VOID_DELAY_S = 24 * 60 * 60
 
 function phaseOf(m: Market, p: MyPosition, nowS: number): { phase: Phase; claimable: bigint } {
   if (m.status === 0) return { phase: nowS < m.expiry ? 'open' : 'settling', claimable: 0n }
@@ -48,7 +51,10 @@ interface Props {
   className?: string
 }
 
-/** Active bets with live status. Ended markets stay visible this session so the outcome shows up in real time. */
+/**
+ * Active bets with live status, and every win or refund still to claim however old its market. Ended markets
+ * stay visible this session so the outcome shows up in real time.
+ */
 export function PositionsTable({ now, onPick, className }: Props) {
   const { address } = useAccount()
   const { markets } = useMarkets()
@@ -61,15 +67,16 @@ export function PositionsTable({ now, onPick, className }: Props) {
   const nowS = now / 1000
 
   const rows = useMemo<Row[]>(() => {
+    // Recent markets refresh on every market event, so prefer them over the copy fetched with the positions.
     const byId = new Map(markets.map((m) => [String(m.id), m]))
     const out: Row[] = []
     for (const r of positions.data ?? []) {
-      const market = byId.get(String(r.id))
-      if (!market) continue
-      const { phase, claimable } = phaseOf(market, r.position, nowS)
+      const market = byId.get(String(r.market.id)) ?? r.market
+      const position = r.position
+      const { phase, claimable } = phaseOf(market, position, nowS)
       // After a reload only active bets (and money still to claim) are listed.
       if (phase !== 'open' && !tracked.has(String(market.id)) && claimable === 0n) continue
-      out.push({ market, position: r.position, phase, claimable })
+      out.push({ market, position, phase, claimable })
     }
     return out.sort((a, b) => a.market.expiry - b.market.expiry)
   }, [positions.data, markets, nowS, tracked])
@@ -78,12 +85,14 @@ export function PositionsTable({ now, onPick, className }: Props) {
     for (const r of rows) if (r.phase === 'open') trackMarket(r.market.id)
   }, [rows])
 
+  // Trades revert while the oracle price is too old for the time left, so those rows can't close for now.
+  const staleRow = (r: Row) => oracleWaiting(prices.get(r.market.assetId)?.updatedAt, nowS, r.market.expiry - nowS)
   const valueOf = (r: Row): bigint | undefined => {
-    const q = quoteFor(prices[r.market.assetId], wadToNumber(r.market.strike), r.market.expiry - nowS)
+    const q = quoteFor(prices.get(r.market.assetId), wadToNumber(r.market.strike), r.market.expiry - nowS)
     if (!q) return undefined
     return proceedsOf(r.position.upUnits, q.sellUp) + proceedsOf(r.position.downUnits, q.sellDown)
   }
-  const canClose = (r: Row) => r.phase === 'open' && r.market.expiry - nowS > TRADING_CLOSE_BUFFER_S + 3
+  const canClose = (r: Row) => r.phase === 'open' && r.market.expiry - nowS > TRADING_CLOSE_BUFFER_S + 3 && !staleRow(r)
 
   const close = async (r: Row): Promise<boolean> => {
     if (!address) return false
@@ -118,6 +127,12 @@ export function PositionsTable({ now, onPick, className }: Props) {
   const claim = async (r: Row) => {
     setWorking(String(r.market.id))
     await run('Claimed', () => write({ ...MARKET, functionName: 'claim', args: [r.market.id] }))
+    setWorking(undefined)
+  }
+  const voidable = (r: Row) => r.phase === 'settling' && nowS >= r.market.expiry + VOID_DELAY_S
+  const voidMarket = async (r: Row) => {
+    setWorking(String(r.market.id))
+    await run('Market voided', () => write({ ...MARKET, functionName: 'voidMarket', args: [r.market.id] }))
     setWorking(undefined)
   }
 
@@ -166,7 +181,6 @@ export function PositionsTable({ now, onPick, className }: Props) {
             </div>
             {loading && rows.length === 0 && [0, 1].map((i) => <Skeleton key={i} className="h-16 w-full rounded-inner" />)}
             {rows.map((r) => {
-              const asset = ASSETS[r.market.assetId]
               const timeLeft = r.market.expiry - nowS
               const value = valueOf(r)
               const cost = r.position.upCost + r.position.downCost
@@ -175,9 +189,9 @@ export function PositionsTable({ now, onPick, className }: Props) {
                 <div key={String(r.market.id)} className={cn(COLS, 'rounded-inner bg-raised px-4 py-3')}>
                   <button className="text-left" onClick={() => onPick(r.market)}>
                     <div className="text-base font-medium">
-                      {asset.key} <span className="text-dim">{fmtDurationLong(r.market.expiry - r.market.createdAt)}</span>
+                      {assetKey(r.market.assetId)} <span className="text-dim">{fmtDurationLong(r.market.expiry - r.market.createdAt)}</span>
                     </div>
-                    <div className="num text-sm text-dim">Strike {fmtPrice(wadToNumber(r.market.strike), 0)}</div>
+                    <div className="num text-sm text-dim">Strike {fmtStrike(r.market.strike)}</div>
                   </button>
 
                   <div className="space-y-1">
@@ -204,12 +218,22 @@ export function PositionsTable({ now, onPick, className }: Props) {
                     {(r.phase === 'won' || r.phase === 'lost' || r.phase === 'voided') && 'Ended'}
                   </div>
 
-                  <div className="flex justify-end">
+                  <div className="flex items-center justify-end gap-2">
+                    {r.phase === 'open' && staleRow(r) && <HelpTip align="end">Waiting for a fresh oracle price. The contract only trades on a recent one, so closing opens again when the keeper pushes the next price.</HelpTip>}
                     {r.phase === 'open' && (
                       <button className="btn btn-secondary h-9 bg-card px-4 text-sm hover:bg-hover" disabled={busy || !canClose(r)} onClick={() => void closeOne(r)}>
                         {isWorking && <Loader2 className="animate-spin" size={14} />}
                         Close
                       </button>
+                    )}
+                    {voidable(r) && (
+                      <>
+                        <HelpTip align="end">This market never settled. Voiding it refunds what everyone paid, and you can then claim your refund.</HelpTip>
+                        <button className="btn btn-secondary h-9 bg-card px-4 text-sm hover:bg-hover" disabled={busy} onClick={() => void voidMarket(r)}>
+                          {isWorking && <Loader2 className="animate-spin" size={14} />}
+                          Void
+                        </button>
+                      </>
                     )}
                     {r.claimable > 0n && (
                       <button className="btn btn-up h-9 px-4 text-sm" disabled={busy} onClick={() => void claim(r)}>

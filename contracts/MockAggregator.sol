@@ -27,6 +27,8 @@ contract MockAggregator is AggregatorV3Interface, Ownable2Step {
 
     event UpdaterSet(address indexed updater, bool allowed);
     event PriceSet(uint80 indexed roundId, int256 answer, uint256 timestamp);
+    /// @dev Chainlink aggregator event, also emitted by StreamsFeed, so one listener fits both networks.
+    event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 updatedAt);
 
     constructor(address initialOwner, uint8 decimals_, string memory description_) Ownable(initialOwner) {
         decimals = decimals_;
@@ -49,6 +51,7 @@ contract MockAggregator is AggregatorV3Interface, Ownable2Step {
         uint80 id = ++latestRoundId;
         _rounds[id] = Round(answer, block.timestamp, block.timestamp, id);
         emit PriceSet(id, answer, block.timestamp);
+        emit AnswerUpdated(answer, id, block.timestamp);
     }
 
     function getRoundData(uint80 roundId) public view override returns (

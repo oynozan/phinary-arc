@@ -5,19 +5,19 @@
 
 import { http, createConfig } from 'wagmi'
 import { mainnet } from 'wagmi/chains'
-import { arcTestnet } from 'viem/chains'
 import { injected } from 'wagmi/connectors'
+import { CHAIN, RPC_HTTP } from './lib/network'
 import { registerChain } from './tracing'
 
 // Pre-register chain RPC URLs so trace events show correct chain names immediately
-registerChain(arcTestnet.id, arcTestnet.rpcUrls.default.http[0])
+registerChain(CHAIN.id, RPC_HTTP)
 
 export const config = createConfig({
-  chains: [arcTestnet, mainnet], // mainnet needed for ENS resolution
+  chains: [CHAIN, mainnet], // mainnet needed for ENS resolution
   connectors: [injected()],
   transports: {
     // Batch concurrent reads into one HTTP request to stay under the public RPC rate limit.
-    [arcTestnet.id]: http(undefined, { batch: { wait: 25 } }),
+    [CHAIN.id]: http(RPC_HTTP, { batch: { wait: 25 } }),
     [mainnet.id]: http(), // ENS resolution uses mainnet
   },
 })

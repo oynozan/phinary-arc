@@ -10,8 +10,17 @@ auto_detect_solc = false
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
+# Fork tests live outside the test dir and are not compiled by default; run them with
+# FOUNDRY_PROFILE=integration forge test --match-path 'contracts/test-integration/**' -vv
+skip = ["contracts/test-integration/**"]
+
+[profile.integration]
+test = "contracts/test-integration"
+skip = []
 
 [rpc_endpoints]
+arc = "https://rpc.mainnet.arc.io"
+arc_testnet = "https://rpc.testnet.arc.io"
 ethereum = "https://ethereum-rpc.publicnode.com"
 sepolia = "https://ethereum-sepolia-rpc.publicnode.com"
 base = "https://base-rpc.publicnode.com"

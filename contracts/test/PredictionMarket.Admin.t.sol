@@ -65,7 +65,7 @@ contract AdminTest is PMTestBase {
         pm.createMarket(ASSET, 0, 300);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(bob);
-        pm.deposit(1e6);
+        pm.deposit(1e6, 0);
     }
 
     function test_Pause_DoesNotBlockSellClaimWithdraw() public {
@@ -74,7 +74,7 @@ contract AdminTest is PMTestBase {
         _buy(bob, id, false, U);
         uint256 tenth = pm.shares(lp) / 10;
         vm.prank(lp);
-        pm.withdraw(tenth); // lp is long past its lock
+        pm.withdraw(tenth, 0); // lp is long past its lock
         vm.prank(owner);
         pm.pause();
         _refresh();
@@ -85,7 +85,7 @@ contract AdminTest is PMTestBase {
         // withdraw
         uint256 l0 = usdc.balanceOf(lp);
         vm.prank(lp);
-        pm.withdraw(tenth);
+        pm.withdraw(tenth, 0);
         assertGt(usdc.balanceOf(lp), l0);
         // settle + claim
         _settleWith(id, SPOT8 - 1e8, 5); // DOWN wins
@@ -118,7 +118,7 @@ contract AdminTest is PMTestBase {
         uint256 id = _create(300);
         _buy(alice, id, true, U);
         vm.prank(bob);
-        pm.deposit(1e6);
+        pm.deposit(1e6, 0);
         assertFalse(pm.paused());
     }
 
@@ -132,6 +132,12 @@ contract AdminTest is PMTestBase {
         vm.expectRevert(PredictionMarket.InvalidParameter.selector);
         vm.prank(owner);
         pm.setEdge(0.05e18 + 1);
+        vm.expectRevert(PredictionMarket.InvalidParameter.selector);
+        vm.prank(owner);
+        pm.setEdge(0.01e18 - 1); // below MIN_EDGE the fair clamps become arbitrage
+        vm.prank(owner);
+        pm.setEdge(0.01e18);
+        assertEq(pm.priceEdge(), 0.01e18);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         vm.prank(alice);
         pm.setEdge(0);

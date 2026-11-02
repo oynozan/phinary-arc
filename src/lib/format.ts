@@ -1,5 +1,5 @@
 import { formatUnits } from 'viem'
-import { formatUnitsFixed } from '@/onchain-money'
+import { formatUnitsFixed, parseUsdc } from '@/onchain-money'
 import { USDC_DECIMALS, WAD } from './contracts'
 
 /** 1e18 fixed point -> number (display only, never for money math). */
@@ -9,6 +9,25 @@ export const wadToNumber = (v: bigint) => Number(formatUnits(v, 18))
 export function fmtPrice(v: bigint | number, digits = 2): string {
   const n = typeof v === 'bigint' ? wadToNumber(v) : v
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits })
+}
+
+/** Decimals for a strike or order level: cents at every price from $1 (settlement compares exact prices), 4 below. */
+export const priceDigits = (n: number) => (Math.abs(n) >= 1 ? 2 : 4)
+
+/** Strike or stop/take-profit level -> "$150.40", "$77,743.79". */
+export function fmtStrike(v: bigint | number): string {
+  const n = typeof v === 'bigint' ? wadToNumber(v) : v
+  return fmtPrice(n, priceDigits(n))
+}
+
+/** A typed USDC amount -> raw units. Empty, invalid, zero or negative input reads as 0. */
+export function parseUsdcInput(v: string): bigint {
+  try {
+    const raw = v.trim() === '' ? 0n : parseUsdc(v)
+    return raw > 0n ? raw : 0n
+  } catch {
+    return 0n
+  }
 }
 
 /** USDC raw (6 decimals) -> "12.34". */

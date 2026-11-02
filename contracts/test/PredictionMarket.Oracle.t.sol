@@ -96,8 +96,13 @@ contract OracleTest is PMTestBase {
     function test_SetFeed_ResetsHistory() public {
         oracle.poke(ASSET);
         assertEq(oracle.getObservationCount(ASSET), 1);
+        skip(60);
+        _setPrice(2100e8);
+        oracle.poke(ASSET);
+        assertTrue(oracle.getVol(ASSET) != DEFAULT_VOL);
         oracle.setFeed(ASSET, address(agg), 3600, 0.2e18, 3e18, DEFAULT_VOL);
         assertEq(oracle.getObservationCount(ASSET), 0);
+        assertEq(oracle.getVol(ASSET), DEFAULT_VOL);
     }
 
     function test_UnknownAssetReverts() public {
@@ -172,7 +177,10 @@ contract OracleTest is PMTestBase {
         assertEq(oracle.getObservationCount(ASSET), 1, "within 60s is a no-op");
         skip(1);
         oracle.poke(ASSET);
-        assertEq(oracle.getObservationCount(ASSET), 2, "at 60s records");
+        assertEq(oracle.getObservationCount(ASSET), 1, "no feed round since the last observation");
+        _refresh();
+        oracle.poke(ASSET);
+        assertEq(oracle.getObservationCount(ASSET), 2, "at 60s with a new round records");
     }
 
     function test_Poke_StaleFeedIsNoOpNotRevert() public {
@@ -181,42 +189,122 @@ contract OracleTest is PMTestBase {
         assertEq(oracle.getObservationCount(ASSET), 0);
     }
 
-    function test_Poke_CapacityCapsAt32() public {
+    function test_Poke_CountsAllObservations() public {
         for (uint256 i; i < 40; ++i) {
             _refresh();
             oracle.poke(ASSET);
             skip(60);
         }
-        assertEq(oracle.getObservationCount(ASSET), 32);
+        assertEq(oracle.getObservationCount(ASSET), 40);
+    }
+
+    function test_Poke_EventCountSaturatesAt255() public {
+        for (uint256 i; i < 255; ++i) {
+            _refresh();
+            oracle.poke(ASSET);
+            skip(60);
+        }
+        _refresh();
+        vm.expectEmit(true, false, false, true, address(oracle));
+        emit PriceOracleAdapter.ObservationRecorded(ASSET, SPOT, block.timestamp, 255);
+        oracle.poke(ASSET);
+        assertEq(oracle.getObservationCount(ASSET), 256);
     }
 
     // ----------------------------------------------------------------- getVol
-    /// @dev Records n observations spaced `dt` apart, alternating price by `bps`/10000.
+    uint256 internal constant LAMBDA = 0.94e18;
+    uint256 internal constant YEAR = 31_536_000;
+
+    /// @dev Records n observations spaced `dt` apart, alternating price by `bps`/10000,
+    ///      then publishes the next alternating price (not yet observed) so getVol's
+    ///      provisional observation continues the pattern.
     function _observe(uint256 n, uint256 dt, int256 bps) internal {
-        for (uint256 i; i < n; ++i) {
+        for (uint256 i; i <= n; ++i) {
             int256 p = (i % 2 == 0) ? SPOT8 : SPOT8 + (SPOT8 * bps) / 10_000;
             _setPrice(p);
-            oracle.poke(ASSET);
-            if (i + 1 < n) skip(dt);
+            if (i < n) {
+                oracle.poke(ASSET);
+                skip(dt);
+            }
         }
     }
 
-    function test_GetVol_DefaultBelowEightObservations() public {
-        _observe(7, 60, 100);
-        assertEq(oracle.getObservationCount(ASSET), 7);
-        assertEq(oracle.getVol(ASSET), DEFAULT_VOL);
+    function test_GetVol_DefaultBeforeAnyObservation() public view {
+        assertEq(oracle.getObservationCount(ASSET), 0);
+        assertEq(oracle.getVol(ASSET), DEFAULT_VOL, "seeded with defaultVol^2, no warm-up");
     }
 
-    function test_GetVol_RealizedAfterEightObservations() public {
-        _observe(8, 60, 10); // 0.1% alternating, 60s apart
-        assertEq(oracle.getObservationCount(ASSET), 8);
+    /// @dev One EWMA step after dt = 90s: d = 0.94^(90/60), var = d * default^2 + (1 - d) * r^2 * YEAR / dt.
+    function test_GetVol_EwmaStepMatchesFormula() public {
+        oracle.poke(ASSET);
+        skip(90);
+        _setPrice(2002e8); // +0.1%
+        uint256 r = 999500333083533; // ln(1.001) in WAD
+        uint256 d = 911363813194269696; // 0.94^1.5 in WAD
+        uint256 expected = (d * (DEFAULT_VOL * DEFAULT_VOL / WAD) + (WAD - d) * (r * r * YEAR / 90 / WAD)) / WAD;
+        assertApproxEqRel(oracle.getVol(ASSET), _sqrt(expected), 1e12, "provisional step");
+        oracle.poke(ASSET);
+        // the poke stores `expected`; the round it recorded is not newer, so no provisional step
+        assertApproxEqRel(oracle.getVol(ASSET), _sqrt(expected), 1e12, "stored step");
+    }
+
+    /// @dev A price published between pokes is reflected immediately and equals what the
+    ///      next poke records, so a buy before that poke and a sell after it see the same sigma.
+    function test_GetVol_ProvisionalEqualsNextPoke() public {
+        oracle.poke(ASSET);
+        skip(20);
+        _setPrice(2010e8); // +0.5% 20s after the last observation
+        uint256 v20 = oracle.getVol(ASSET);
+        assertGt(v20, DEFAULT_VOL, "jump already priced in");
+        skip(40);
+        assertEq(oracle.getVol(ASSET), v20, "dt floored at MIN_OBS_INTERVAL until the next poke");
+        oracle.poke(ASSET);
+        assertEq(oracle.getVol(ASSET), v20, "the poke records exactly the provisional step");
+        oracle.poke(ASSET);
+        skip(60);
+        oracle.poke(ASSET); // no new feed round: no observation, sigma unchanged
+        assertEq(oracle.getObservationCount(ASSET), 2);
+        assertEq(oracle.getVol(ASSET), v20, "a poke without a new round never moves sigma");
+    }
+
+    /// @dev Time consistency: a return's weight barely depends on when it is first observed.
+    ///      A jump observed after 60s and after 120s gives nearly the same contribution, while a
+    ///      fixed-LAMBDA EWMA would halve it (the old "sigma glide").
+    function test_GetVol_JumpContributionIndependentOfObservationDelay() public {
+        oracle.setFeed(ASSET, address(agg), 3600, 0.01e18, 3e18, 0.01e18); // tiny seed variance
+        oracle.poke(ASSET);
+        skip(60);
+        _setPrice(2020e8); // +1%
+        uint256 at60 = oracle.getVol(ASSET);
+        skip(60);
+        uint256 at120 = oracle.getVol(ASSET);
+        // contribution ratio (1 - 0.94^2) / 2 / (1 - 0.94) = 0.97 in variance, ~0.985 in sigma
+        assertApproxEqRel(at120, at60 * 985 / 1000, 0.002e18, "no glide");
+        skip(600); // 12 minutes: a fixed LAMBDA would cut the jump's variance to 1/12
+        assertApproxEqRel(oracle.getVol(ASSET), at60 * 853 / 1000, 0.005e18, "sqrt((1-0.94^12)/12/0.06)");
+    }
+
+    /// @dev After a gap of about a day the old variance has no weight left (lambdaEff ~ 0) and
+    ///      the step is continuous at the 1-day cutoff where exp is skipped.
+    function test_GetVol_LongGapUsesSampleOnly() public {
+        oracle.poke(ASSET);
+        skip(1 days - 1);
+        _setPrice(2100e8); // +5%
+        // ln(1.05) * sqrt(YEAR / dt)
+        assertApproxEqRel(oracle.getVol(ASSET), 0.932140e18, 1e13, "just below the cutoff");
+        skip(1);
+        assertApproxEqRel(oracle.getVol(ASSET), 0.932135e18, 1e13, "at the cutoff");
+    }
+
+    function test_GetVol_ConvergesToRealized() public {
+        _observe(200, 60, 10); // 0.1% alternating, 60s apart
+        assertEq(oracle.getObservationCount(ASSET), 200);
         // sigma = ln(1.001) * sqrt(YEAR/60) ~= 0.7246
         assertApproxEqRel(oracle.getVol(ASSET), 0.7246e18, 0.005e18);
-        assertTrue(oracle.getVol(ASSET) != DEFAULT_VOL);
     }
 
     function test_GetVol_ScalesWithSamplingInterval() public {
-        _observe(8, 120, 10); // 120s apart -> sigma/sqrt(2)
+        _observe(200, 120, 10); // 120s apart -> sigma/sqrt(2)
         assertApproxEqRel(oracle.getVol(ASSET), 0.5124e18, 0.005e18);
     }
 
@@ -226,14 +314,39 @@ contract OracleTest is PMTestBase {
     }
 
     function test_GetVol_ClampedToMin() public {
-        _observe(8, 60, 0); // flat -> 0 < minVol
+        _observe(60, 60, 0); // flat: 0.8 * 0.97^60 < minVol
         assertEq(oracle.getVol(ASSET), 0.2e18);
     }
 
-    function test_GetVol_WrappedRingStillRealized() public {
-        _observe(40, 60, 10);
-        assertEq(oracle.getObservationCount(ASSET), 32);
-        assertApproxEqRel(oracle.getVol(ASSET), 0.7246e18, 0.005e18);
+    function test_GetVol_StaleFeedUsesStoredVariance() public {
+        oracle.poke(ASSET);
+        skip(3601); // feed older than maxStaleness: no provisional step
+        assertEq(oracle.getVol(ASSET), DEFAULT_VOL);
+    }
+
+    /// @dev The stored variance is capped at maxVol^2, so one extreme print does not pin
+    ///      sigma at maxVol for hours.
+    function test_GetVol_VarianceCappedAtMaxVolSquared() public {
+        oracle.poke(ASSET);
+        skip(60);
+        _setPrice(3000e8); // +50%
+        oracle.poke(ASSET);
+        skip(60);
+        _refresh();
+        oracle.poke(ASSET);
+        // stored 9 * 0.94; the last round is already observed, so no provisional step
+        assertApproxEqRel(oracle.getVol(ASSET), 2.9086e18, 0.001e18);
+    }
+
+    function _sqrt(uint256 v) internal pure returns (uint256) {
+        uint256 x = v * WAD;
+        uint256 z = x;
+        uint256 y = (x + 1) / 2;
+        while (y < z) {
+            z = y;
+            y = (x / y + y) / 2;
+        }
+        return z;
     }
 
     // ------------------------------------------------------- settlementPrice
@@ -300,12 +413,11 @@ contract OracleTest is PMTestBase {
     function test_Settlement_InvalidAnswersRejected() public {
         uint256 E = block.timestamp + 500;
         vm.warp(E - 10);
-        _setPrice(-1); // invalid predecessor
+        _setPrice(-1); // invalid predecessor: only its id and timestamp matter
         vm.warp(E + 1);
         _setPrice(2000e8);
         uint80 r1 = agg.latestRoundId();
-        vm.expectRevert(PriceOracleAdapter.InvalidSettlementRound.selector);
-        oracle.settlementPrice(ASSET, r1, E);
+        assertEq(oracle.settlementPrice(ASSET, r1, E), 2000e18);
 
         // a zero-answer round at/after expiry is not settleable
         uint256 E2 = block.timestamp + 500;

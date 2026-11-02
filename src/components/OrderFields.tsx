@@ -1,5 +1,5 @@
 import { parseUnits } from 'viem'
-import { fmtPrice } from '@/lib/format'
+import { fmtStrike } from '@/lib/format'
 
 export interface OrderValidation {
   stop: bigint
@@ -26,11 +26,11 @@ export function validateOrder(isUp: boolean, spot: bigint | undefined, stopStr: 
   if (stop === 0n && tp === 0n) return { stop, takeProfit: tp }
   if (spot === undefined) return { stop, takeProfit: tp, error: 'Waiting for the oracle price.' }
   if (isUp) {
-    if (stop !== 0n && stop >= spot) return { stop, takeProfit: tp, error: `Stop loss must be below ${fmtPrice(spot)}.` }
-    if (tp !== 0n && tp <= spot) return { stop, takeProfit: tp, error: `Take profit must be above ${fmtPrice(spot)}.` }
+    if (stop !== 0n && stop >= spot) return { stop, takeProfit: tp, error: `Stop loss must be below ${fmtStrike(spot)}.` }
+    if (tp !== 0n && tp <= spot) return { stop, takeProfit: tp, error: `Take profit must be above ${fmtStrike(spot)}.` }
   } else {
-    if (tp !== 0n && tp >= spot) return { stop, takeProfit: tp, error: `Take profit must be below ${fmtPrice(spot)}.` }
-    if (stop !== 0n && stop <= spot) return { stop, takeProfit: tp, error: `Stop loss must be above ${fmtPrice(spot)}.` }
+    if (tp !== 0n && tp >= spot) return { stop, takeProfit: tp, error: `Take profit must be below ${fmtStrike(spot)}.` }
+    if (stop !== 0n && stop <= spot) return { stop, takeProfit: tp, error: `Stop loss must be above ${fmtStrike(spot)}.` }
   }
   return { stop, takeProfit: tp }
 }
@@ -58,7 +58,7 @@ interface Props {
 }
 
 export function OrderFields({ isUp, spot, stop, takeProfit, onStop, onTakeProfit, error }: Props) {
-  const hint = (pct: bigint) => (spot ? fmtPrice((spot * pct) / 100n, 0).replace('$', '') : 'Price')
+  const hint = (pct: bigint) => (spot ? fmtStrike((spot * pct) / 100n).replace('$', '') : 'Price')
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3">

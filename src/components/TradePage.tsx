@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useAccount } from 'wagmi'
-import { formatUnits, parseUnits } from 'viem'
+import { formatUnits } from 'viem'
 import { AnimatedPrice } from '@/components/AnimatedPrice'
 import { AssetTabs } from '@/components/AssetTabs'
 import { DurationTabs } from '@/components/DurationTabs'
@@ -9,12 +9,16 @@ import { PriceChart, type OrderLines } from '@/components/PriceChart'
 import { TradePanel } from '@/components/TradePanel'
 import { HelpTip } from '@/components/ui/help-tip'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useMarkets, useOracleSeries, usePosition } from '@/hooks/data'
+import { useMarkets, useMaxStrikeDeviation, useOracleSeries, useOracleSpot, usePosition } from '@/hooks/data'
 import { useCoinbasePrice } from '@/hooks/useCoinbasePrice'
+import { useKrakenPrice } from '@/hooks/useKrakenPrice'
 import { useMarketBets } from '@/hooks/useMarketBets'
-import { openByDuration, quoteFor, STALE_AFTER_S, useAssetPricing, useNow } from '@/hooks/useMarkets'
-import { ASSETS, type AssetMeta, type Market } from '@/lib/contracts'
-import { fmtPrice, wadToNumber } from '@/lib/format'
+import { findStrikeMarket, openByDuration, oracleWaiting, quoteFor, useAssetPricing, useNow } from '@/hooks/useMarkets'
+import { MIN_TIME_TO_BET_S } from '@/lib/bet'
+import { assetById, type AssetMeta, type Market } from '@/lib/contracts'
+import { fmtPrice, fmtStrike, wadToNumber } from '@/lib/format'
+import { isTestnet } from '@/lib/network'
+import { checkStrike } from '@/lib/strike'
 import { cn } from '@/lib/utils'
 
 interface Props {
@@ -25,7 +29,6 @@ interface Props {
 }
 
 const CHART_HEIGHT = 360
-const MAX_STRIKE_DEVIATION = 0.1
 
 export function TradePage({ asset, onAsset, duration, onDuration }: Props) {
   const { address } = useAccount()
@@ -33,8 +36,14 @@ export function TradePage({ asset, onAsset, duration, onDuration }: Props) {
   const nowS = now / 1000
   const { markets, isLoading } = useMarkets()
   const pricing = useAssetPricing(asset.id)
+  const oracleSpot = useOracleSpot(asset.id)?.price
+  const maxDeviation = useMaxStrikeDeviation()
   const oracleSeries = useOracleSeries(asset.id)
-  const cb = useCoinbasePrice(asset.product)
+  // Both hooks always run (hook order); only the one for this asset's kind connects.
+  const coinbase = useCoinbasePrice(asset.kind === 'crypto' ? asset.chart : undefined)
+  const kraken = useKrakenPrice(asset.kind === 'stock' ? asset.chart : undefined)
+  const cb = asset.kind === 'stock' ? kraken : coinbase
+  const venue = asset.kind === 'stock' ? 'Kraken' : 'Coinbase'
 
   const open = useMemo(() => openByDuration(markets, asset.id, Math.floor(now / 1000) * 1000), [markets, asset.id, now])
   const selected = open.get(duration)
@@ -47,34 +56,25 @@ export function TradePage({ asset, onAsset, duration, onDuration }: Props) {
   const defaultStrikeText = defaultStrikeNum !== undefined ? defaultStrikeNum.toFixed(2) : ''
   const edited = strikeState.scope === scope ? strikeState.text : undefined
   const strikeText = edited ?? defaultStrikeText
-  const strikeEdited = edited !== undefined && edited.trim() !== defaultStrikeText
+  // Typing back the displayed strike (even as 77743.790) means the market's own strike, not a new market a fraction of a cent away.
+  const typed = edited?.trim().replace(/,/g, '')
+  const strikeEdited = typed !== undefined && typed !== defaultStrikeText && !(typed !== '' && Number(typed).toFixed(2) === defaultStrikeText)
   const onStrikeText = (text: string) => setStrikeState({ scope, text })
   const onStrikeReset = () => setStrikeState({ scope, text: undefined })
 
-  const strikeCheck = useMemo(() => {
-    const text = strikeText.trim().replace(/,/g, '')
-    if (!strikeEdited) return { wad: undefined, error: undefined }
-    if (text === '') return { wad: undefined, error: 'Enter a strike price.' }
-    let wad: bigint
-    try {
-      wad = parseUnits(text, 18)
-    } catch {
-      return { wad: undefined, error: 'Enter a valid price.' }
-    }
-    const value = Number(text)
-    if (!(value > 0)) return { wad: undefined, error: 'Enter a valid price.' }
-    if (pricing.spot !== undefined && Math.abs(value / pricing.spot - 1) > MAX_STRIKE_DEVIATION) {
-      return { wad: undefined, error: `Strike must be within 10% of ${fmtPrice(pricing.spot, 0)}.` }
-    }
-    return { wad, error: undefined }
-  }, [strikeText, strikeEdited, pricing.spot])
+  const strikeCheck = useMemo(() => (strikeEdited ? checkStrike(strikeText, oracleSpot, maxDeviation) : { wad: undefined, error: undefined }), [strikeText, strikeEdited, oracleSpot, maxDeviation])
   const customStrike = strikeCheck.wad !== undefined && strikeCheck.wad !== selected?.strike ? strikeCheck.wad : undefined
+  // A custom strike reuses an open market with that strike when one exists, so preview its real time left.
+  const strikeMarket = customStrike !== undefined ? findStrikeMarket(markets, asset.id, duration, customStrike, nowS, MIN_TIME_TO_BET_S) : undefined
 
   const strikeNum = customStrike !== undefined ? wadToNumber(customStrike) : defaultStrikeNum
-  const timeLeft = customStrike !== undefined || !selected ? duration : selected.expiry - nowS
-  const quote = useMemo(() => quoteFor(pricing, strikeNum, timeLeft), [pricing, strikeNum, timeLeft])
-  const marketQuote = useMemo(() => (selected ? quoteFor(pricing, wadToNumber(selected.strike), selected.expiry - nowS) : undefined), [pricing, selected, nowS])
-  const stale = pricing.updatedAt !== undefined && nowS - pricing.updatedAt > STALE_AFTER_S
+  const target = customStrike !== undefined ? strikeMarket : selected
+  const timeLeft = target ? target.expiry - nowS : duration
+  const quote = useMemo(() => quoteFor(pricing, strikeNum, timeLeft, nowS), [pricing, strikeNum, timeLeft, nowS])
+  const marketQuote = useMemo(() => (selected ? quoteFor(pricing, wadToNumber(selected.strike), selected.expiry - nowS, nowS) : undefined), [pricing, selected, nowS])
+  // Trades revert on an oracle price past maxTradeStaleness or older than a quarter of the time left.
+  const stale = oracleWaiting(pricing.updatedAt, nowS, timeLeft)
+  const marketStale = selected !== undefined && oracleWaiting(pricing.updatedAt, nowS, selected.expiry - nowS)
 
   const { bets } = useMarketBets(selected?.id)
   const { position } = usePosition(selected?.id, address)
@@ -92,7 +92,9 @@ export function TradePage({ asset, onAsset, duration, onDuration }: Props) {
 
   const onPickMarket = useCallback(
     (m: Market) => {
-      onAsset(ASSETS[m.assetId])
+      const a = assetById(m.assetId)
+      if (!a) return
+      onAsset(a)
       onDuration(m.expiry - m.createdAt)
     },
     [onAsset, onDuration],
@@ -112,7 +114,8 @@ export function TradePage({ asset, onAsset, duration, onDuration }: Props) {
               <span className={cn('h-2 w-2 rounded-full', live ? 'bg-brand' : 'bg-white/40')} />
               {live ? 'Live' : cb.status === 'connecting' ? 'Connecting' : 'Reconnecting'}
               <HelpTip align="end">
-                The line is the live Coinbase price. The dashed line is the strike and the vertical line is the deadline. Avatars mark bets: green ring up, red ring down. Bets settle on the oracle price.
+                The line is the live {venue} price. The dashed line is the strike and the vertical line is the deadline. Avatars mark bets: green ring up, red ring down. Bets settle on the oracle price.
+                {asset.kind === 'stock' && ` ${asset.name} trades around the clock here: outside US market hours the price comes from tokenized-stock and derivatives venues, so it can drift from the last Nasdaq close.`}
               </HelpTip>
             </div>
           </div>
@@ -128,12 +131,16 @@ export function TradePage({ asset, onAsset, duration, onDuration }: Props) {
             <div className="mt-1 flex flex-wrap items-center gap-x-4 text-sm text-dim">
               {diffPct !== undefined && strikeNum !== undefined && (
                 <span className={diffPct >= 0 ? 'text-up' : 'text-down'}>
-                  {Math.abs(diffPct).toFixed(2)}% {diffPct >= 0 ? 'above' : 'below'} the {fmtPrice(strikeNum, 0)} strike
+                  {Math.abs(diffPct).toFixed(2)}% {diffPct >= 0 ? 'above' : 'below'} the {fmtStrike(strikeNum)} strike
                 </span>
               )}
               <span className="num inline-flex items-center gap-1">
                 Oracle {pricing.spot !== undefined ? fmtPrice(pricing.spot) : '...'}
-                <HelpTip>Bets settle on this testnet oracle price, not the live Coinbase price above.</HelpTip>
+                <HelpTip>
+                  {isTestnet
+                    ? `Bets settle on this testnet oracle price, which the keeper pushes from ${venue}, not on the live price above.`
+                    : `Bets settle on this oracle price from Chainlink Data Streams${asset.kind === 'stock' ? ' (its 24/7 stream)' : ''}, not on the live ${venue} price above.`}
+                </HelpTip>
               </span>
             </div>
           </div>
@@ -159,6 +166,7 @@ export function TradePage({ asset, onAsset, duration, onDuration }: Props) {
           duration={duration}
           quote={quote}
           marketQuote={marketQuote}
+          marketStale={marketStale}
           stale={stale}
           now={now}
           strikeText={strikeText}

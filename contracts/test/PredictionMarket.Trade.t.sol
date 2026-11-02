@@ -16,6 +16,7 @@ contract TradeTest is PMTestBase {
     // -------------------------------------------------------------------- buy
     function test_Buy_Up_HappyPath() public {
         _refresh();
+        oracle.poke(ASSET); // record this block's observation first so the quote matches execution
         Q memory q = _q(id);
         uint256 cost = _ceilMul(U, q.buyUp);
         uint256 a0 = usdc.balanceOf(alice);
@@ -42,6 +43,7 @@ contract TradeTest is PMTestBase {
 
     function test_Buy_Down_HappyPath() public {
         _refresh();
+        oracle.poke(ASSET);
         Q memory q = _q(id);
         uint256 cost = _ceilMul(U, q.buyDown);
         vm.expectEmit(true, true, false, true, address(pm));
@@ -81,6 +83,7 @@ contract TradeTest is PMTestBase {
 
     function test_Buy_SlippageMaxCost() public {
         _refresh();
+        oracle.poke(ASSET);
         Q memory q = _q(id);
         uint256 cost = _ceilMul(U, q.buyUp);
         vm.expectRevert(PredictionMarket.SlippageExceeded.selector);

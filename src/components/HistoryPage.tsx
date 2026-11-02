@@ -1,10 +1,10 @@
 import { useMemo } from 'react'
 import { useAccount } from 'wagmi'
 import { ExternalLink } from 'lucide-react'
-import { useMarkets } from '@/hooks/data'
+import { useMarkets, useMarketsById } from '@/hooks/data'
 import { useHistory, type HistoryItem } from '@/hooks/history'
-import { ASSETS, CHAIN_ID, type Market } from '@/lib/contracts'
-import { fmtDurationLong, fmtPrice, fmtUsdc, wadToNumber } from '@/lib/format'
+import { assetKey, CHAIN_ID, type Market } from '@/lib/contracts'
+import { fmtDurationLong, fmtStrike, fmtUsdc } from '@/lib/format'
 import { Skeleton } from '@/components/ui/skeleton'
 import { buildTxExplorerUrl } from '@/onchain-facts'
 import { cn } from '@/lib/utils'
@@ -25,7 +25,7 @@ function describe(i: HistoryItem): { action: string; tone?: string; detail: stri
     case 'claimed':
       return { action: 'Claimed', tone: 'text-up', detail: `Received ${usd(i.amount)}` }
     case 'order-set': {
-      const parts = [i.stop ? `Stop loss ${fmtPrice(wadToNumber(i.stop), 0)}` : '', i.takeProfit ? `Take profit ${fmtPrice(wadToNumber(i.takeProfit), 0)}` : ''].filter(Boolean)
+      const parts = [i.stop ? `Stop loss ${fmtStrike(i.stop)}` : '', i.takeProfit ? `Take profit ${fmtStrike(i.takeProfit)}` : ''].filter(Boolean)
       return { action: `Set order on ${side}`, detail: parts.join(', ') }
     }
     case 'order-cancelled':
@@ -51,14 +51,18 @@ function marketName(id: bigint | undefined, byId: Map<string, Market>): string {
   if (id === undefined) return ''
   const m = byId.get(String(id))
   if (!m) return `Market #${id}`
-  return `${ASSETS[m.assetId].key} ${fmtDurationLong(m.expiry - m.createdAt)} · Strike ${fmtPrice(wadToNumber(m.strike), 0)}`
+  return `${assetKey(m.assetId)} ${fmtDurationLong(m.expiry - m.createdAt)} · Strike ${fmtStrike(m.strike)}`
 }
 
 export function HistoryPage() {
   const { address } = useAccount()
   const { markets } = useMarkets()
   const history = useHistory(address)
-  const byId = useMemo(() => new Map(markets.map((m) => [String(m.id), m])), [markets])
+  // Markets older than the recent list are read by id, so every row gets a name.
+  const recentIds = useMemo(() => new Set(markets.map((m) => String(m.id))), [markets])
+  const olderIds = useMemo(() => [...new Set((history.data?.items ?? []).flatMap((i) => (i.marketId !== undefined && !recentIds.has(String(i.marketId)) ? [i.marketId] : [])))], [history.data, recentIds])
+  const older = useMarketsById(olderIds)
+  const byId = useMemo(() => new Map([...(older ?? []), ...markets].map((m) => [String(m.id), m])), [markets, older])
   const items = useMemo(() => [...(history.data?.items ?? [])].sort((a, b) => b.time - a.time || Number(b.block - a.block) || b.logIndex - a.logIndex), [history.data])
 
   return (

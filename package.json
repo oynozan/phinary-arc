@@ -13,9 +13,15 @@
     "check": "bash scripts/check.sh",
     "contracts:build": "forge build",
     "contracts:test": "forge test",
+    "test": "bun test tests/unit tests/frontend",
+    "test:keeper": "forge build && bun test tests/keeper",
+    "test:live": "bun test tests/live",
+    "test:fork": "FOUNDRY_PROFILE=integration forge test --match-path 'contracts/test-integration/**' -vv",
     "keeper": "bun run ./scripts/keeper.ts",
     "setup": "bun run ./scripts/setup.ts",
-    "gen:abis": "bun run ./scripts/gen-abis.ts"
+    "gen:abis": "bun run ./scripts/gen-abis.ts",
+    "deploy:testnet": "NETWORK=testnet forge script contracts/script/DeployPhinary.s.sol --fork-url arc_testnet && echo 'Simulated only, nothing was sent. To deploy, run the same forge command yourself with --broadcast --sender <OWNER> plus the owner signer (--account <keystore> or --private-key).'",
+    "deploy:mainnet": "NETWORK=mainnet forge script contracts/script/DeployPhinary.s.sol --fork-url arc && echo 'Simulated only, nothing was sent. To deploy, run the same forge command yourself with --broadcast --sender <OWNER> plus the owner signer (--account <keystore> or --private-key).'"
   },
   "dependencies": {
     "@circle-fin/adapter-viem-v2": "^1.19.2",

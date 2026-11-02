@@ -9,9 +9,11 @@ type BuyProps = ComponentProps<typeof BuyForm>
 interface Props extends BuyProps {
   /** quote for the market's own strike, used to value and sell an existing position */
   marketQuote: Quote | undefined
+  /** the oracle price is too old to trade the selected market */
+  marketStale: boolean
 }
 
-export function TradePanel({ marketQuote, ...buy }: Props) {
+export function TradePanel({ marketQuote, marketStale, ...buy }: Props) {
   const [tab, setTab] = useState<'buy' | 'sell'>('buy')
   const market: Market | undefined = buy.market
 
@@ -27,7 +29,7 @@ export function TradePanel({ marketQuote, ...buy }: Props) {
       </div>
 
       {tab === 'buy' && <BuyForm {...buy} />}
-      {tab === 'sell' && (market ? <PositionPanel market={market} quote={marketQuote} /> : <p className="text-sm text-dim">No open market to sell in.</p>)}
+      {tab === 'sell' && (market ? <PositionPanel market={market} quote={marketQuote} stale={marketStale} /> : <p className="text-sm text-dim">No open market to sell in.</p>)}
     </div>
   )
 }

@@ -8,3 +8,9 @@ recovery_file*
 contracts/out
 contracts/cache
 *.log
+# Forge fuzz/invariant failure persistence and test-failure record (repo root, from forge config defaults)
+/cache/fuzz/
+/cache/invariant/
+/cache/test-failures
+# forge script dry runs (no --broadcast); real broadcast records are kept
+broadcast/**/dry-run/

@@ -71,7 +71,7 @@ abstract contract PMTestBase is Test {
         }
         _deployPM();
         vm.prank(lp);
-        pm.deposit(LP_DEPOSIT);
+        pm.deposit(LP_DEPOSIT, 0);
         skip(1 hours + 1);
         _setPrice(SPOT8);
     }
@@ -122,6 +122,20 @@ abstract contract PMTestBase is Test {
 
     function _assertSolvent() internal view {
         assertGe(usdc.balanceOf(address(pm)), pm.totalLocked() + pm.unclaimedPayouts(), "insolvent");
+    }
+
+    /// @dev Withdraw the most the contract allows: while markets hold reserves the vault keeps
+    ///      MIN_RESIDUAL_SHARES outstanding (totalLocked == 0 implies no void buffer either).
+    function _withdrawMax(address who) internal {
+        uint256 s = pm.shares(who);
+        if (pm.totalLocked() > 0) {
+            uint256 others = pm.totalShares() - s;
+            uint256 keep = others >= pm.MIN_RESIDUAL_SHARES() ? 0 : pm.MIN_RESIDUAL_SHARES() - others;
+            s = s > keep ? s - keep : 0;
+        }
+        if (s == 0 || pm.previewWithdraw(s) == 0) return;
+        vm.prank(who);
+        pm.withdraw(s, 0);
     }
 
     /// @dev Warp to expiry+delta, publish `p8` as the first round at/after expiry, settle.

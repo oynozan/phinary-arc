@@ -8,22 +8,17 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useNow } from '@/hooks/useMarkets'
 import { usePreviewWithdraw, useUsdc, useVault } from '@/hooks/data'
 import { useTx } from '@/hooks/useTx'
-import { needsApproval, UNLIMITED_ALLOWANCE } from '@/lib/bet'
+import { GAS_RESERVE, needsApproval, spendable, UNLIMITED_ALLOWANCE } from '@/lib/bet'
 import { CHAIN_ID, MARKET, MARKET_ADDRESS, USDC_ADDRESS } from '@/lib/contracts'
-import { fmtCountdown, fmtUsdc, wadToNumber } from '@/lib/format'
-import { parseUsdc } from '@/onchain-money'
+import { fmtCountdown, fmtUsdc, parseUsdcInput, wadToNumber } from '@/lib/format'
+import { rpc } from '@/lib/realtime'
+import { maxWithdrawShares } from '@/lib/vault'
 
 const SHARE_DECIMALS = 9
 const PCTS = [25, 50, 75, 100]
 const AMOUNTS = ['10', '50', '100']
-
-function safeParse(v: string): bigint {
-  try {
-    return v.trim() === '' ? 0n : parseUsdc(v)
-  } catch {
-    return 0n
-  }
-}
+// Accept at most 0.5% less than the preview read right before sending.
+const withTolerance = (v: bigint) => (v * 995n) / 1000n
 
 function Stat({ label, value, tip }: { label: string; value?: string; tip?: string }) {
   return (
@@ -50,27 +45,40 @@ export function VaultPanel() {
   const stats = vault.data?.stats
   const shares = vault.data?.shares ?? 0n
   const unlockAt = vault.data?.unlockAt ?? 0
-  const withdrawShares = pct === 100 ? shares : (shares * BigInt(pct)) / 100n
+  const exposed = !!stats && (stats[3] > 0n || stats[1] > stats[5])
+  const maxShares = maxWithdrawShares(shares, stats?.[2] ?? 0n, exposed)
+  const wanted = (shares * BigInt(pct)) / 100n
+  const withdrawShares = wanted < maxShares ? wanted : maxShares
+  const capped = withdrawShares < wanted
+  const soleLp = shares > 0n && shares === stats?.[2]
   const withdrawValue = usePreviewWithdraw(withdrawShares)
   const fullValue = usePreviewWithdraw(shares)
 
-  const amountRaw = safeParse(amount)
+  const amountRaw = parseUsdcInput(amount)
   const lockLeft = Math.max(0, unlockAt - Math.floor(now / 1000))
-  const notEnough = !!address && (balance ?? 0n) < amountRaw
+  const notEnough = !!address && spendable(balance ?? 0n) < amountRaw
 
   const deposit = async () => {
     if (!address) {
       setOpen(true)
       return
     }
+    if (amountRaw === 0n) return
     if (needsApproval(allowance)) {
       const ok = await run('USDC approved', () => write({ address: USDC_ADDRESS, abi: erc20Abi, chainId: CHAIN_ID, functionName: 'approve', args: [MARKET_ADDRESS, UNLIMITED_ALLOWANCE] }))
       if (!ok) return
     }
-    await run('Deposited', () => write({ ...MARKET, functionName: 'deposit', args: [amountRaw] }))
+    await run('Deposited', async () => {
+      const minted = await rpc.readContract({ address: MARKET.address, abi: MARKET.abi, functionName: 'previewDeposit', args: [amountRaw] })
+      return write({ ...MARKET, functionName: 'deposit', args: [amountRaw, withTolerance(minted)] })
+    })
   }
   const withdraw = async () => {
-    await run('Withdrawn', () => write({ ...MARKET, functionName: 'withdraw', args: [withdrawShares] }))
+    if (withdrawShares === 0n) return
+    await run('Withdrawn', async () => {
+      const out = await rpc.readContract({ address: MARKET.address, abi: MARKET.abi, functionName: 'previewWithdraw', args: [withdrawShares] })
+      return write({ ...MARKET, functionName: 'withdraw', args: [withdrawShares, withTolerance(out)] })
+    })
   }
 
   return (
@@ -91,13 +99,13 @@ export function VaultPanel() {
         <section className="card flex flex-col gap-6">
           <h2 className="flex items-center gap-1.5 text-base font-medium">
             Deposit
-            <HelpTip>Deposits are locked for 1 hour before they can be withdrawn.</HelpTip>
+            <HelpTip>Deposits are locked for 1 hour before they can be withdrawn. ${fmtUsdc(GAS_RESERVE)} stays in your wallet for gas.</HelpTip>
           </h2>
           <div className="space-y-2">
             <div className="flex items-center justify-between text-sm">
               <span className="text-dim">Amount</span>
               {address && balance !== undefined && (
-                <button className="num text-dim transition hover:text-white" onClick={() => setAmount(formatUnits(balance, 6))}>
+                <button className="num text-dim transition hover:text-white" onClick={() => setAmount(formatUnits(spendable(balance), 6))}>
                   Balance ${fmtUsdc(balance)}
                 </button>
               )}
@@ -126,7 +134,11 @@ export function VaultPanel() {
         <section className="card flex flex-col gap-6">
           <h2 className="flex items-center gap-1.5 text-base font-medium">
             Your share
-            <HelpTip>While markets are open, withdrawals are priced against the vault's worst case. The full value returns once they settle.</HelpTip>
+            <HelpTip>
+              While markets are open, withdrawals are priced against the vault's worst case. The full value returns once they settle.
+              {exposed && ' While they are open the vault must keep at least one share in total, so no withdrawal can take the last one.'}
+              {capped && (soleLp ? ' You are the only depositor, so this keeps one share in the vault until they settle and the released reserve stays yours.' : ' This withdrawal is capped so that one share stays in the vault.')}
+            </HelpTip>
           </h2>
           <div className="grid grid-cols-2 gap-3">
             <div className="panel space-y-1 p-4">

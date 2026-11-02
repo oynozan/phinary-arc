@@ -12,6 +12,9 @@ const MAX_BUY = 0.99
 const MIN_SELL = 0.01
 export const TRADING_CLOSE_S = 15
 
+/** The contract refuses trades (OracleTooOldForExpiry) once the oracle price is older than a quarter of the time left. */
+export const oracleTooOld = (oracleAge: number, timeLeft: number) => oracleAge * 4 > timeLeft
+
 /** Standard normal CDF (Abramowitz & Stegun 26.2.17, the same approximation the contract uses). */
 export function normCdf(x: number): number {
   const ax = Math.min(Math.abs(x), 8)
@@ -40,12 +43,14 @@ export interface QuoteInput {
   /** seconds until expiry */
   timeLeft: number
   edge: number
+  /** seconds since the oracle price was set; when given, a too-old price quotes no executable prices like the contract */
+  oracleAge?: number
 }
 
-export function localQuote({ spot, strike, sigma, timeLeft, edge }: QuoteInput): Quote {
+export function localQuote({ spot, strike, sigma, timeLeft, edge, oracleAge }: QuoteInput): Quote {
   const fairUp = Math.min(MAX_FAIR, Math.max(MIN_FAIR, binaryUpPrice(spot, strike, sigma, timeLeft)))
   const fairDown = 1 - fairUp
-  const closed = timeLeft <= TRADING_CLOSE_S
+  const closed = timeLeft <= TRADING_CLOSE_S || (oracleAge !== undefined && oracleTooOld(oracleAge, timeLeft))
   const buyUp = closed || fairUp + edge >= MAX_BUY ? 0 : fairUp + edge
   const buyDown = closed || fairDown + edge >= MAX_BUY ? 0 : fairDown + edge
   const sell = (fair: number) => (closed ? 0 : fair > edge + MIN_SELL ? fair - edge : MIN_SELL)

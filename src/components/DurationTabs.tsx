@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion'
 import { DURATIONS } from '@/hooks/useMarkets'
 import type { Market } from '@/lib/contracts'
-import { fmtCountdown, fmtDurationLong, fmtPrice, wadToNumber } from '@/lib/format'
+import { fmtCountdown, fmtDurationLong, fmtStrike } from '@/lib/format'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 
@@ -34,7 +34,7 @@ export function DurationTabs({ value, onChange, open, loading, now }: Props) {
               {m ? (
                 <>
                   <span className="num block text-2xl font-semibold">{fmtCountdown(Math.max(0, m.expiry - now / 1000))}</span>
-                  <span className={cn('num block text-xs', active ? 'text-white/85' : 'text-dim')}>Strike {fmtPrice(wadToNumber(m.strike), 0)}</span>
+                  <span className={cn('num block text-xs', active ? 'text-white/85' : 'text-dim')}>Strike {fmtStrike(m.strike)}</span>
                 </>
               ) : loading ? (
                 <Skeleton className="mt-2 h-8 w-24" />

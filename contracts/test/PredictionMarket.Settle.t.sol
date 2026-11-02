@@ -167,7 +167,7 @@ contract SettleTest is PMTestBase {
         uint256 lpShares = pm.shares(lp);
         uint256 before_ = usdc.balanceOf(lp);
         vm.prank(lp);
-        pm.withdraw(lpShares);
+        pm.withdraw(lpShares, 0);
         // LP earned the (cost - payout) margin: 2*0.02*U edge on the matched pair
         assertGe(usdc.balanceOf(lp) - before_, LP_DEPOSIT, "LP never loses on a matched pair");
     }

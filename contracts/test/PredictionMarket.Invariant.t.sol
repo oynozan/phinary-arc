@@ -125,7 +125,7 @@ contract PMHandler is Test {
     function deposit(uint256 aSeed, uint256 amt) public {
         amt = bound(amt, 1e6, 50_000e6);
         vm.prank(_actor(aSeed));
-        try pm.deposit(amt) {
+        try pm.deposit(amt, 0) {
             ++okDeposits;
         } catch {}
     }
@@ -137,7 +137,7 @@ contract PMHandler is Test {
         uint256 amt = bound(bps, 1, 10_000) * sh / 10_000;
         if (amt == 0) return;
         vm.prank(a);
-        try pm.withdraw(amt) {
+        try pm.withdraw(amt, 0) {
             ++okWithdraws;
         } catch {}
     }

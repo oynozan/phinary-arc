@@ -15,7 +15,7 @@ contract VaultTest is PMTestBase {
         vm.expectEmit(true, false, false, true, address(pm));
         emit PredictionMarket.Deposited(bob, 1e6, 1e9);
         vm.prank(bob);
-        pm.deposit(1e6); // 1 USDC -> 1e9 share units (9 display decimals)
+        pm.deposit(1e6, 0); // 1 USDC -> 1e9 share units (9 display decimals)
         assertEq(pm.shares(bob), 1e9);
         assertEq(pm.sharesOf(bob), 1e9);
         assertEq(pm.totalShares(), 1e9);
@@ -27,7 +27,7 @@ contract VaultTest is PMTestBase {
         assertEq(pm.shares(lp), LP_DEPOSIT * 1000);
         uint256 preview = pm.previewDeposit(1000e6);
         vm.prank(bob);
-        pm.deposit(1000e6);
+        pm.deposit(1000e6, 0);
         assertEq(pm.shares(bob), preview);
         assertEq(preview, 1000e6 * 1000);
         assertEq(usdc.balanceOf(address(pm)), LP_DEPOSIT + 1000e6);
@@ -36,12 +36,12 @@ contract VaultTest is PMTestBase {
     function test_Deposit_ZeroReverts() public {
         vm.expectRevert(PredictionMarket.InvalidAmount.selector);
         vm.prank(bob);
-        pm.deposit(0);
+        pm.deposit(0, 0);
     }
 
     function test_Withdraw_FullRoundTripReturnsDeposit() public {
         vm.prank(bob);
-        pm.deposit(1000e6);
+        pm.deposit(1000e6, 0);
         skip(1 hours);
         uint256 b0 = usdc.balanceOf(bob);
         uint256 s = pm.shares(bob);
@@ -49,7 +49,7 @@ contract VaultTest is PMTestBase {
         vm.expectEmit(true, false, false, true, address(pm));
         emit PredictionMarket.Withdrawn(bob, s, expected);
         vm.prank(bob);
-        pm.withdraw(s);
+        pm.withdraw(s, 0);
         assertApproxEqAbs(usdc.balanceOf(bob) - b0, 1000e6, 2);
         assertEq(pm.shares(bob), 0);
         assertEq(pm.totalShares(), LP_DEPOSIT * 1000);
@@ -57,12 +57,12 @@ contract VaultTest is PMTestBase {
 
     function test_Withdraw_PartialIsProportional() public {
         vm.prank(bob);
-        pm.deposit(1000e6);
+        pm.deposit(1000e6, 0);
         skip(1 hours);
         uint256 s = pm.shares(bob);
         uint256 b0 = usdc.balanceOf(bob);
         vm.prank(bob);
-        pm.withdraw(s / 4);
+        pm.withdraw(s / 4, 0);
         assertApproxEqAbs(usdc.balanceOf(bob) - b0, 250e6, 2);
         assertEq(pm.shares(bob), s - s / 4);
     }
@@ -70,21 +70,21 @@ contract VaultTest is PMTestBase {
     function test_Withdraw_Validation() public {
         vm.expectRevert(PredictionMarket.InvalidAmount.selector);
         vm.prank(lp);
-        pm.withdraw(0);
+        pm.withdraw(0, 0);
         uint256 tooMany = pm.shares(lp) + 1;
         vm.expectRevert(PredictionMarket.InsufficientShares.selector);
         vm.prank(lp);
-        pm.withdraw(tooMany);
+        pm.withdraw(tooMany, 0);
         vm.expectRevert(PredictionMarket.InsufficientShares.selector);
         vm.prank(bob); // never deposited
-        pm.withdraw(1);
+        pm.withdraw(1, 0);
     }
 
     // ------------------------------------------------------------ deposit lock
     function test_Lock_OneHourFromDeposit() public {
         assertEq(pm.depositUnlockAt(bob), 0);
         vm.prank(bob);
-        pm.deposit(1000e6);
+        pm.deposit(1000e6, 0);
         uint256 unlock = block.timestamp + 1 hours;
         assertEq(pm.depositUnlockAt(bob), unlock);
         uint256 s = pm.shares(bob);
@@ -92,26 +92,26 @@ contract VaultTest is PMTestBase {
         vm.warp(unlock - 1);
         vm.expectRevert(abi.encodeWithSelector(PredictionMarket.DepositLocked.selector, unlock));
         vm.prank(bob);
-        pm.withdraw(s);
+        pm.withdraw(s, 0);
 
         vm.warp(unlock);
         vm.prank(bob);
-        pm.withdraw(s);
+        pm.withdraw(s, 0);
         assertEq(pm.shares(bob), 0);
     }
 
     function test_Lock_AnyDepositRelocksAllShares() public {
         vm.prank(bob);
-        pm.deposit(1000e6);
+        pm.deposit(1000e6, 0);
         skip(59 minutes);
         vm.prank(bob);
-        pm.deposit(1e6);
+        pm.deposit(1e6, 0);
         uint256 unlock = block.timestamp + 1 hours;
         assertEq(pm.depositUnlockAt(bob), unlock);
         skip(2 minutes); // original lock would have expired
         vm.expectRevert(abi.encodeWithSelector(PredictionMarket.DepositLocked.selector, unlock));
         vm.prank(bob);
-        pm.withdraw(1);
+        pm.withdraw(1, 0);
     }
 
     // -------------------------------------------------------------- two-sided NAV
@@ -150,7 +150,7 @@ contract VaultTest is PMTestBase {
     function _attack(uint256 depositAmt, uint256 u) internal {
         uint256 start = usdc.balanceOf(attacker);
         vm.prank(attacker);
-        pm.deposit(depositAmt);
+        pm.deposit(depositAmt, 0);
         skip(1 hours + 1);
         uint256 mid = _create(3600);
         _buy(attacker, mid, true, u);
@@ -158,7 +158,7 @@ contract VaultTest is PMTestBase {
         // withdraw everything during exposure (low NAV)
         uint256 s = pm.shares(attacker);
         vm.prank(attacker);
-        pm.withdraw(s);
+        pm.withdraw(s, 0);
         _assertSolvent();
         // resolve and collect the guaranteed winning side
         _settleWith(mid, SPOT8 + 1e8, 5);
@@ -170,7 +170,7 @@ contract VaultTest is PMTestBase {
         uint256 lpBefore = usdc.balanceOf(lp);
         uint256 lpShares = pm.shares(lp);
         vm.prank(lp);
-        pm.withdraw(lpShares);
+        pm.withdraw(lpShares, 0);
         assertGe(usdc.balanceOf(lp) - lpBefore + 1, LP_DEPOSIT, "honest LP not diluted");
     }
 
@@ -199,19 +199,24 @@ contract VaultTest is PMTestBase {
         uint256 s = pm.shares(lp);
         uint256 l0 = usdc.balanceOf(lp);
         vm.prank(lp);
-        pm.withdraw(s); // withdraw everything allowed
+        vm.expectRevert(PredictionMarket.LastLpWhileExposed.selector);
+        pm.withdraw(s, 0);
+        vm.prank(lp);
+        vm.expectRevert(PredictionMarket.LastLpWhileExposed.selector);
+        pm.withdraw(s - 1, 0);
+        _withdrawMax(lp); // everything allowed: the last LP keeps MIN_RESIDUAL_SHARES
         uint256 got = usdc.balanceOf(lp) - l0;
         assertLe(got, free0, "payout bounded by free liquidity");
-        assertLe(pm.freeLiquidity(), 1, "all free liquidity consumed");
+        assertLe(pm.freeLiquidity(), free0 * 1e9 / s + 1, "only the residual share's slice is left");
         assertGe(usdc.balanceOf(address(pm)), pm.totalLocked() + pm.unclaimedPayouts());
-        assertEq(pm.shares(lp), 0);
+        assertEq(pm.shares(lp), 1e9);
     }
 
     // ------------------------------------------------------- exposure cap
     function test_ExposureCap_BuyRevertsWhenVaultTooSmall() public {
         _deployPM();
         vm.prank(lp);
-        pm.deposit(100e6);
+        pm.deposit(100e6, 0);
         uint256 mid = _create(3600);
         _buy(alice, mid, true, 200e6); // balance 100 + ~104 >= 200
         _refresh();
@@ -233,7 +238,7 @@ contract VaultTest is PMTestBase {
     function test_ExposureCap_OppositeSideAddsNinetyNinePercentReserve() public {
         _deployPM();
         vm.prank(lp);
-        pm.deposit(100e6);
+        pm.deposit(100e6, 0);
         uint256 mid = _create(3600);
         _buy(alice, mid, true, 200e6);
         uint256 locked0 = pm.totalLocked();
@@ -250,16 +255,14 @@ contract VaultTest is PMTestBase {
     function _sellBack(uint256 u1, uint256 u2, int256 moveBps) internal {
         _deployPM();
         vm.prank(lp);
-        pm.deposit(u1 + u2);
+        pm.deposit(u1 + u2, 0);
         skip(1 hours + 1);
         _setPrice(SPOT8);
         uint256 mid = _create(3600);
         _buy(alice, mid, true, u1);
         _buy(bob, mid, false, u2);
 
-        uint256 s = pm.shares(lp);
-        vm.prank(lp);
-        pm.withdraw(s); // LP takes the maximum allowed
+        _withdrawMax(lp); // the last LP keeps MIN_RESIDUAL_SHARES
         _assertSolvent();
 
         _setPrice(SPOT8 + (SPOT8 * moveBps) / 10_000);

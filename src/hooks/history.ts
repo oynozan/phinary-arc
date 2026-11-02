@@ -30,7 +30,7 @@ export interface HistoryItem {
   time: number
 }
 
-interface HistoryData {
+export interface HistoryData {
   items: HistoryItem[]
   scannedTo: bigint
   /** net units per market (carried between incremental scans) */
@@ -62,12 +62,11 @@ async function scan(who: Address, from: bigint, to: bigint, net: Map<string, { u
       const base = { key: `${l.transactionHash}-${l.logIndex}`, block: l.blockNumber, logIndex: l.logIndex, tx: l.transactionHash }
       const a = l.args as Record<string, unknown>
       const isMine = typeof a.user === 'string' && a.user.toLowerCase() === mine
+      // Writes new objects: the previous entries are shared with the cached data, which a failed scan must not change.
       const bump = (id: bigint, isUp: boolean, units: bigint) => {
         const k = String(id)
         const cur = net.get(k) ?? { up: 0n, down: 0n }
-        if (isUp) cur.up += units
-        else cur.down += units
-        net.set(k, cur)
+        net.set(k, isUp ? { ...cur, up: cur.up + units } : { ...cur, down: cur.down + units })
       }
       switch (l.eventName) {
         case 'MarketCreated':
@@ -96,8 +95,15 @@ async function scan(who: Address, from: bigint, to: bigint, net: Map<string, { u
           break
         case 'OrderExecuted':
           if (isMine) {
-            raw.push({ ...base, kind: 'order-hit', marketId: a.marketId as bigint, isUp: a.isUp as boolean, amount: a.proceeds as bigint, units: a.units as bigint, trigger: Number(a.triggered) })
-            bump(a.marketId as bigint, a.isUp as boolean, -(a.units as bigint))
+            // executeOrder emits Sold for the same exit just before this, in the same transaction: relabel that row, count the units once.
+            const sold = raw.find((r) => r.kind === 'sold' && r.tx === l.transactionHash && r.marketId === a.marketId && r.isUp === a.isUp)
+            if (sold) {
+              sold.kind = 'order-hit'
+              sold.trigger = Number(a.triggered)
+            } else {
+              raw.push({ ...base, kind: 'order-hit', marketId: a.marketId as bigint, isUp: a.isUp as boolean, amount: a.proceeds as bigint, units: a.units as bigint, trigger: Number(a.triggered) })
+              bump(a.marketId as bigint, a.isUp as boolean, -(a.units as bigint))
+            }
           }
           break
         case 'Deposited':
@@ -138,21 +144,23 @@ async function scan(who: Address, from: bigint, to: bigint, net: Map<string, { u
   return raw.map((r) => ({ ...r, time: blockTimes.get(r.block) ?? 0 }))
 }
 
+/** Extends the previous history with the blocks since it was scanned. Never changes `prev`. */
+export async function loadHistory(who: Address, prev: HistoryData | undefined): Promise<HistoryData> {
+  const head = await rpc.getBlockNumber()
+  const from = prev ? prev.scannedTo + 1n : DEPLOY_BLOCK
+  if (prev && from > head) return prev
+  const net = new Map(prev?.net ?? [])
+  const fresh = await scan(who, from, head, net)
+  const seen = new Set((prev?.items ?? []).map((i) => i.key))
+  return { items: [...(prev?.items ?? []), ...fresh.filter((i) => !seen.has(i.key))], scannedTo: head, net }
+}
+
 /** Every action by this wallet, scanned once from the deployment block and extended as new events arrive. */
 export function useHistory(who: Address | undefined) {
   const qc = useQueryClient()
   return useQuery({
     queryKey: qk.history(who ?? ''),
-    queryFn: async (): Promise<HistoryData> => {
-      const prev = qc.getQueryData<HistoryData>(qk.history(who ?? ''))
-      const head = await rpc.getBlockNumber()
-      const from = prev ? prev.scannedTo + 1n : DEPLOY_BLOCK
-      if (from > head) return prev as HistoryData
-      const net = new Map(prev?.net ?? [])
-      const fresh = await scan(who as Address, from, head, net)
-      const seen = new Set((prev?.items ?? []).map((i) => i.key))
-      return { items: [...(prev?.items ?? []), ...fresh.filter((i) => !seen.has(i.key))], scannedTo: head, net }
-    },
+    queryFn: () => loadHistory(who as Address, qc.getQueryData<HistoryData>(qk.history(who ?? ''))),
     enabled: !!who,
     staleTime: Infinity,
     gcTime: Infinity,

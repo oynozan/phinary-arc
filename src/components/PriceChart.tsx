@@ -7,7 +7,7 @@ import { ChartAvatar } from '@/components/BettorAvatar'
 import type { PricePoint } from '@/hooks/useCoinbasePrice'
 import type { Bet } from '@/hooks/useMarketBets'
 import type { Market } from '@/lib/contracts'
-import { fmtClock, fmtPrice, fmtUsdc, shortAddr, wadToNumber } from '@/lib/format'
+import { fmtClock, fmtPrice, fmtStrike, fmtUsdc, shortAddr, wadToNumber } from '@/lib/format'
 import { fmtHHMM, priceScale, timeTicks } from '@/lib/chartScale'
 
 const BRAND = '#1083FF'
@@ -110,7 +110,7 @@ function PulseDot({ cx, cy }: { cx?: number; cy?: number }) {
 }
 
 export function PriceChart({ market, coinbase, oracleSeries, bets, me, orders, strikeOverride, now, height }: Props) {
-  // Keep the Coinbase line even if the socket drops (it just stops extending); fall back only when there is none.
+  // Keep the exchange line even if the socket drops (it just stops extending); fall back only when there is none.
   const series = coinbase.length >= 2 ? coinbase : oracleSeries
   const nowBucket = Math.floor(now / 10_000) * 10_000
 
@@ -150,9 +150,11 @@ export function PriceChart({ market, coinbase, oracleSeries, bets, me, orders, s
     // Tags in the right gutter, nudged apart so none overlap.
     const specs: TagSpec[] = []
     if (last) specs.push({ key: 'now', text: fmtNum(last.p), value: last.p, bg: BRAND, fg: WHITE })
-    if (strike !== undefined) specs.push({ key: 'strike', text: `${strikeOverride !== undefined ? 'New strike' : 'Strike'} ${fmtNum(strike)}`, value: strike, bg: WHITE, fg: CANVAS })
-    if (orders?.takeProfit) specs.push({ key: 'tp', text: `TP ${fmtNum(orders.takeProfit)}`, value: orders.takeProfit, bg: UP, fg: CANVAS })
-    if (orders?.stop) specs.push({ key: 'sl', text: `SL ${fmtNum(orders.stop)}`, value: orders.stop, bg: DOWN, fg: WHITE })
+    // Strike and order levels always show their cents (the axis may round); settlement compares exact prices.
+    const fmtLevel = (v: number) => fmtStrike(v).replace('$', '')
+    if (strike !== undefined) specs.push({ key: 'strike', text: `${strikeOverride !== undefined ? 'New strike' : 'Strike'} ${fmtLevel(strike)}`, value: strike, bg: WHITE, fg: CANVAS })
+    if (orders?.takeProfit) specs.push({ key: 'tp', text: `TP ${fmtLevel(orders.takeProfit)}`, value: orders.takeProfit, bg: UP, fg: CANVAS })
+    if (orders?.stop) specs.push({ key: 'sl', text: `SL ${fmtLevel(orders.stop)}`, value: orders.stop, bg: DOWN, fg: WHITE })
     const plotH = height - TOP - BOTTOM
     const yOf = (v: number) => ((scale.hi - v) / (scale.hi - scale.lo)) * plotH
     const sorted = [...specs].sort((a, b) => yOf(a.value) - yOf(b.value))

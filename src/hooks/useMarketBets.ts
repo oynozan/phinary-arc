@@ -1,4 +1,4 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import type { Address } from 'viem'
 import { marketAbi } from '@/lib/abis'
 import { DEPLOY_BLOCK, MARKET_ADDRESS } from '@/lib/contracts'
@@ -19,6 +19,14 @@ export interface Bet {
 
 const LOOKBACK_BLOCKS = 30_000n
 const CHUNK = 5_000n
+
+/** Live bets that arrived while a market's scan was running. The scan stops at the head it read first, so they are merged in. */
+const arrivedDuringScan = new Map<string, Bet[]>()
+
+export function holdBetForScan(marketId: bigint, bet: Bet): void {
+  const k = String(marketId)
+  arrivedDuringScan.set(k, [...(arrivedDuringScan.get(k) ?? []), bet])
+}
 
 async function fetchBets(marketId: bigint): Promise<Bet[]> {
   const head = await rpc.getBlockNumber()
@@ -42,19 +50,25 @@ async function fetchBets(marketId: bigint): Promise<Bet[]> {
       })
     }
   }
+  const held = arrivedDuringScan.get(String(marketId)) ?? []
+  arrivedDuringScan.delete(String(marketId))
+  for (const bet of held) if (!bets.some((b) => b.key === bet.key)) bets.push(bet)
   return bets
 }
 
-/** Bets on a market: scanned once, then appended live by the realtime sync. */
-export function useMarketBets(marketId: bigint | undefined) {
-  const q = useQuery({
+export function betsQueryOptions(marketId: bigint | undefined) {
+  return {
     queryKey: qk.bets(marketId ?? 0n),
     queryFn: () => fetchBets(marketId as bigint),
     enabled: marketId !== undefined,
     staleTime: Infinity,
     gcTime: Infinity,
     refetchOnWindowFocus: false,
-    placeholderData: keepPreviousData,
-  })
+  }
+}
+
+/** Bets on a market: scanned once, then appended live by the realtime sync. */
+export function useMarketBets(marketId: bigint | undefined) {
+  const q = useQuery(betsQueryOptions(marketId))
   return { bets: q.data ?? [], loading: q.isPending }
 }
