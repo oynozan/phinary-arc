@@ -77,8 +77,7 @@ Arc mainnet: nothing deployed. Chainlink VerifierProxy `0xcE73c8ad08CBDEaCa6078B
 - `bun run typecheck` fails only on `scripts/compass-deploy.ts` (`@circlefin/compass-chains` not installed); pre-existing.
 - `LiveDeployment.t.sol` head-solvency fork test can hit `rpc.testnet.arc.io` 429s; pin `ARC_FORK_BLOCK` or retry.
 - StreamsFeed's accepting path is tested only with `MockVerifierProxy`; no real signed report yet (no Streams credentials). The Data Streams `GET /api/v1/reports?timestamp=` semantics (exact second or nearest) are not documented; the keeper checks the window itself and falls back to `/reports/page`.
-- An exact gas estimate for `buy`/`sell`/`executeOrder` runs out of gas when the oracle's 60s observation interval elapses between the estimate and the block (the embedded `poke` then writes). `tests/keeper` `Chain.tx` adds 25% (`withHeadroom`); the frontend relies on the wallet's headroom, and the keeper retries a failed order next tick.
-- Root `cache/test-failures` and `cache/invariant/` are tracked from the initial commit although now gitignored; `git rm --cached` them to stop the churn.
+- An exact gas estimate for `buy`/`sell`/`executeOrder` runs out of gas when the oracle's 60s observation interval elapses between the estimate and the block (the embedded `poke` then writes). The keeper's `executeOrder` and `tests/keeper` `Chain.tx` (`withHeadroom`) add 25%; the frontend relies on the wallet's headroom.
 
 ## Share links
 
